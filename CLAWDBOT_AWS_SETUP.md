@@ -476,17 +476,301 @@ clawdbot health
 
 - [ ] **CHECKPOINT:** ClawdBot gateway is running
 
-### Step 1.11: Add Anthropic API Key
+### Step 1.11: Configure AI Provider (AWS Bedrock)
+
+You have two options for AI models. We'll use **AWS Bedrock** since you have an AWS account with credits!
+
+#### Why AWS Bedrock?
+- ✅ Uses your existing AWS credits ($1,000 Activate!)
+- ✅ No separate Anthropic API key needed
+- ✅ Pay-as-you-go pricing
+- ✅ Claude models available (Sonnet, Haiku, Opus)
+
+#### Step 1.11.1: Enable Bedrock Models in AWS Console
+
+1. Go to [AWS Bedrock Console](https://console.aws.amazon.com/bedrock/)
+2. Select your region (e.g., `us-east-1` or `us-west-2`)
+3. Click **"Model access"** in the left sidebar
+4. Click **"Manage model access"**
+5. Check the boxes for:
+   - ✅ Anthropic - Claude 3 Sonnet
+   - ✅ Anthropic - Claude 3 Haiku
+   - ✅ Anthropic - Claude 3.5 Sonnet (if available)
+6. Click **"Save changes"**
+7. Wait for status to change to **"Access granted"** (usually instant)
+
+- [ ] **CHECKPOINT:** Bedrock model access enabled
+
+#### Step 1.11.2: Create IAM User for Bedrock Access
+
+In **CloudShell**, run:
 
 ```bash
-# Configure auth
-clawdbot configure --section auth
+# Create a dedicated IAM user for ClawdBot
+aws iam create-user --user-name clawdbot-bedrock
 
-# Or set directly:
-# clawdbot configure --section auth --set anthropic.apiKey=YOUR_API_KEY
+# Create access policy for Bedrock
+cat > /tmp/bedrock-policy.json << 'EOF'
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "bedrock:InvokeModel",
+                "bedrock:InvokeModelWithResponseStream"
+            ],
+            "Resource": "arn:aws:bedrock:*::foundation-model/anthropic.*"
+        }
+    ]
+}
+EOF
+
+# Create the policy
+aws iam create-policy \
+    --policy-name ClawdBotBedrockAccess \
+    --policy-document file:///tmp/bedrock-policy.json
+
+# Get your AWS account ID
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+echo "Account ID: $ACCOUNT_ID"
+
+# Attach policy to user
+aws iam attach-user-policy \
+    --user-name clawdbot-bedrock \
+    --policy-arn arn:aws:iam::${ACCOUNT_ID}:policy/ClawdBotBedrockAccess
+
+# Create access keys
+aws iam create-access-key --user-name clawdbot-bedrock
+
+# ⚠️ SAVE THE OUTPUT! You'll need:
+# - AccessKeyId
+# - SecretAccessKey
 ```
 
-- [ ] **CHECKPOINT:** API key configured
+**⚠️ IMPORTANT:** Save the `AccessKeyId` and `SecretAccessKey` somewhere secure - you cannot retrieve the secret key again!
+
+- [ ] **CHECKPOINT:** IAM user created with Bedrock access
+
+#### Step 1.11.3: Configure AWS Credentials on EC2
+
+SSH into your EC2 instance:
+```bash
+ssh clawdbot
+```
+
+**Option A: AWS Credentials File (for CLI testing)**
+
+```bash
+# Set up AWS credentials for ClawdBot
+mkdir -p ~/.aws
+
+cat > ~/.aws/credentials << 'EOF'
+[default]
+aws_access_key_id = YOUR_ACCESS_KEY_ID_HERE
+aws_secret_access_key = YOUR_SECRET_ACCESS_KEY_HERE
+EOF
+
+cat > ~/.aws/config << 'EOF'
+[default]
+region = us-east-1
+output = json
+EOF
+
+# Set proper permissions
+chmod 600 ~/.aws/credentials
+chmod 600 ~/.aws/config
+
+# Verify credentials work
+aws bedrock list-foundation-models --query 'modelSummaries[?contains(modelId, `anthropic`)].modelId' --region us-east-1
+```
+
+You should see a list of Anthropic models - that means it's working!
+
+> ⚠️ **CRITICAL: Clawdbot Systemd Service Issue**
+>
+> The AWS credentials file works for CLI commands, but **Clawdbot runs as a systemd service** which does NOT inherit your shell environment or read `~/.aws/credentials` automatically.
+>
+> You MUST also complete **Option B** below for Clawdbot to access Bedrock!
+
+**Option B: Systemd Drop-in Configuration (REQUIRED for Clawdbot)**
+
+Clawdbot only supports Amazon Bedrock via the **AWS SDK default credential chain** (environment variables, shared config, instance roles). The systemd service runs in isolation and won't see your shell credentials.
+
+Create a systemd drop-in file to inject AWS credentials into the service:
+
+```bash
+# Create drop-in directory
+mkdir -p ~/.config/systemd/user/clawdbot-gateway.service.d
+
+# Create environment file (replace with YOUR keys)
+cat > ~/.config/systemd/user/clawdbot-gateway.service.d/aws.conf << 'EOF'
+[Service]
+Environment="AWS_ACCESS_KEY_ID=YOUR_ACCESS_KEY_ID_HERE"
+Environment="AWS_SECRET_ACCESS_KEY=YOUR_SECRET_ACCESS_KEY_HERE"
+Environment="AWS_REGION=us-east-1"
+EOF
+
+# Set secure permissions
+chmod 600 ~/.config/systemd/user/clawdbot-gateway.service.d/aws.conf
+
+# Reload systemd to pick up changes
+systemctl --user daemon-reload
+
+# Restart gateway
+systemctl --user restart clawdbot-gateway
+```
+
+**Verify the drop-in is loaded:**
+```bash
+systemctl --user status clawdbot-gateway
+# Look for "Drop-In:" section showing aws.conf
+```
+
+- [ ] **CHECKPOINT:** AWS credentials configured on EC2 (both file AND systemd)
+
+#### Step 1.11.4: Configure ClawdBot for Bedrock
+
+> ⚠️ **CRITICAL: Use `models.providers` configuration!**
+>
+> The `clawdbot configure` commands may not work for newer models. You MUST add the model definition under `models.providers` in `clawdbot.json` for cross-region inference profiles to work.
+
+**Edit `~/.clawdbot/clawdbot.json` and add the `models.providers` section:**
+
+```bash
+# Install nano if not available
+sudo dnf install nano -y
+
+# Edit the config file
+nano ~/.clawdbot/clawdbot.json
+```
+
+Add this `models` section (merge with existing config):
+
+```json
+{
+  "models": {
+    "providers": {
+      "amazon-bedrock": {
+        "baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+        "api": "bedrock-converse-stream",
+        "auth": "aws-sdk",
+        "models": [
+          {
+            "id": "us.anthropic.claude-opus-4-5-20251101-v1:0",
+            "name": "Claude Opus 4.5 (US)",
+            "reasoning": true,
+            "input": ["text", "image"],
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+            "contextWindow": 200000,
+            "maxTokens": 8192
+          },
+          {
+            "id": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "name": "Claude Sonnet 4.5 (US)",
+            "reasoning": false,
+            "input": ["text", "image"],
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+            "contextWindow": 200000,
+            "maxTokens": 8192
+          },
+          {
+            "id": "anthropic.claude-3-haiku-20240307-v1:0",
+            "name": "Claude 3 Haiku",
+            "reasoning": false,
+            "input": ["text", "image"],
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+            "contextWindow": 200000,
+            "maxTokens": 4096
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "amazon-bedrock/us.anthropic.claude-opus-4-5-20251101-v1:0",
+        "fallbacks": ["amazon-bedrock/anthropic.claude-3-haiku-20240307-v1:0"]
+      }
+    }
+  }
+}
+```
+
+**Restart the gateway:**
+```bash
+systemctl --user restart clawdbot-gateway
+
+# Verify the model is recognized
+clawdbot models list | grep -i claude
+```
+
+**Available Bedrock Claude Model IDs:**
+
+> ⚠️ **IMPORTANT: Cross-Region Inference Profiles Required!**
+>
+> Newer Claude models (Claude 3.5+, Claude 4+) in `us-east-1` require using the **cross-region inference profile ID** (prefixed with `us.`) instead of the raw model ID.
+>
+> - ❌ Raw ID: `anthropic.claude-opus-4-5-20251101-v1:0` → Fails with "on-demand throughput isn't supported"
+> - ✅ Profile ID: `us.anthropic.claude-opus-4-5-20251101-v1:0` → Works!
+
+| Model | Raw Model ID | Cross-Region Profile ID (use this!) |
+|-------|--------------|-------------------------------------|
+| **Claude Opus 4.5** | `anthropic.claude-opus-4-5-20251101-v1:0` | `us.anthropic.claude-opus-4-5-20251101-v1:0` |
+| **Claude Sonnet 4.5** | `anthropic.claude-sonnet-4-5-20250929-v1:0` | `us.anthropic.claude-sonnet-4-5-20250929-v1:0` |
+| **Claude Opus 4.1** | `anthropic.claude-opus-4-1-20250805-v1:0` | `us.anthropic.claude-opus-4-1-20250805-v1:0` |
+| **Claude Sonnet 4** | `anthropic.claude-sonnet-4-20250514-v1:0` | `us.anthropic.claude-sonnet-4-20250514-v1:0` |
+| Claude 3.7 Sonnet | `anthropic.claude-3-7-sonnet-20250219-v1:0` | `us.anthropic.claude-3-7-sonnet-20250219-v1:0` |
+| Claude 3.5 Sonnet v2 | `anthropic.claude-3-5-sonnet-20241022-v2:0` | `us.anthropic.claude-3-5-sonnet-20241022-v2:0` |
+| Claude 3.5 Haiku | `anthropic.claude-3-5-haiku-20241022-v1:0` | `us.anthropic.claude-3-5-haiku-20241022-v1:0` |
+| Claude 3 Haiku | `anthropic.claude-3-haiku-20240307-v1:0` | Works without prefix ✅ |
+| Claude 3 Sonnet | `anthropic.claude-3-sonnet-20240229-v1:0` | Works without prefix ✅ |
+| Claude 3 Opus | `anthropic.claude-3-opus-20240229-v1:0` | Works without prefix ✅ |
+
+**Recommended for ClawdBot:**
+```bash
+# Best balance of capability and cost
+us.anthropic.claude-sonnet-4-5-20250929-v1:0
+
+# Most capable (higher cost)
+us.anthropic.claude-opus-4-5-20251101-v1:0
+
+# Budget-friendly
+us.anthropic.claude-3-5-haiku-20241022-v1:0
+```
+
+- [ ] **CHECKPOINT:** ClawdBot configured for AWS Bedrock
+
+#### Step 1.11.5: Test the Configuration
+
+```bash
+# Test that ClawdBot can reach Bedrock
+clawdbot health
+
+# Start a test conversation (from EC2)
+clawdbot chat "Hello, can you confirm you're running via AWS Bedrock?"
+```
+
+Then from your **local machine** with the SSH tunnel:
+1. Open `http://localhost:18789/?token=YOUR_TOKEN`
+2. Start a conversation in the dashboard
+3. Verify responses are coming through!
+
+- [ ] **CHECKPOINT:** AWS Bedrock integration working
+
+#### Alternative: Direct Anthropic API Key
+
+If you prefer to use Anthropic directly (requires separate API key from [console.anthropic.com](https://console.anthropic.com/)):
+
+```bash
+# On EC2:
+clawdbot configure --section auth --set provider=anthropic
+clawdbot configure --section auth --set anthropic.apiKey=sk-ant-api03-xxxxx
+systemctl --user restart clawdbot-gateway
+```
+
+- [ ] **CHECKPOINT:** AI provider configured (Bedrock OR Anthropic)
 
 ---
 
@@ -955,6 +1239,77 @@ aws ec2 describe-instances --instance-ids $INSTANCE_ID \
 
 **Fix:** Allocate an Elastic IP (see Step 1.4)
 
+### AWS Bedrock "Missing auth" or "Unknown model" errors
+
+**Symptoms:**
+- `clawdbot models` shows "Missing auth" for amazon-bedrock
+- Error: `Unknown model: amazon-bedrock/...`
+- Gateway crashes on startup with config validation errors
+
+**Root Causes & Solutions:**
+
+1. **Systemd service doesn't see AWS credentials**
+   
+   The Clawdbot gateway runs as a systemd service, which is isolated from your shell environment. Even if `aws sts get-caller-identity` works in SSH, the service won't see those credentials.
+   
+   **Fix:** Create a systemd drop-in file (see Step 1.11.3 Option B):
+   ```bash
+   mkdir -p ~/.config/systemd/user/clawdbot-gateway.service.d
+   cat > ~/.config/systemd/user/clawdbot-gateway.service.d/aws.conf << 'EOF'
+   [Service]
+   Environment="AWS_ACCESS_KEY_ID=YOUR_KEY"
+   Environment="AWS_SECRET_ACCESS_KEY=YOUR_SECRET"
+   Environment="AWS_REGION=us-east-1"
+   EOF
+   systemctl --user daemon-reload
+   systemctl --user restart clawdbot-gateway
+   ```
+
+2. **Using raw model ID instead of cross-region inference profile**
+   
+   Newer Claude models require the `us.` prefix for cross-region inference.
+   
+   - ❌ `amazon-bedrock/anthropic.claude-opus-4-5-20251101-v1:0`
+   - ✅ `amazon-bedrock/us.anthropic.claude-opus-4-5-20251101-v1:0`
+
+3. **Invalid auth profile format in config**
+   
+   Clawdbot does NOT support embedded AWS credentials in `clawdbot.json`. This format is INVALID:
+   ```json
+   "amazon-bedrock:default": {
+     "provider": "amazon-bedrock",
+     "mode": "keys",
+     "accessKeyId": "...",  // ❌ NOT SUPPORTED
+     "secretAccessKey": "..."
+   }
+   ```
+   
+   **Fix:** Remove invalid auth profiles and use systemd environment variables instead.
+
+4. **AWS Marketplace subscription not activated**
+   
+   Error: `AccessDeniedException ... aws-marketplace:Subscribe`
+   
+   **Fix:** Log into AWS Console as admin, go to Bedrock Playground, select the model, and send a test message. This triggers the one-time marketplace subscription acceptance.
+
+**Verify Bedrock is working:**
+```bash
+# Test AWS SDK directly (should work if credentials are correct)
+python3 -c "
+import boto3
+client = boto3.client('bedrock-runtime', region_name='us-east-1')
+response = client.invoke_model(
+    modelId='us.anthropic.claude-3-haiku-20240307-v1:0',
+    body='{\"anthropic_version\":\"bedrock-2023-05-31\",\"max_tokens\":10,\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}'
+)
+print('SUCCESS!' if response else 'FAILED')
+"
+
+# Check Clawdbot sees the credentials
+clawdbot models
+# Should NOT show "Missing auth" for amazon-bedrock
+```
+
 ---
 
 ## Quick Reference Commands
@@ -1030,7 +1385,7 @@ http://localhost:18789/?token=YOUR_TOKEN
 | 1.8 Install ClawdBot | ✅ Done | 2026-01-27 |
 | 1.9 Run onboarding | ✅ Done | 2026-01-27 |
 | 1.10 Start gateway | ✅ Done | 2026-01-27 |
-| 1.11 Add API key | ⏳ Pending (can add later) | |
+| 1.11 Configure AWS Bedrock | ⏭️ **NEXT STEP** | |
 
 **Notes:**
 - Upgraded to t2.small (2GB RAM) due to OOM errors on t2.micro
