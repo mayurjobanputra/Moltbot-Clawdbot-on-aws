@@ -28,6 +28,7 @@ The guide is written to be both human-readable AND machine-parseable with clear 
 - 🔒 **Secure by default** - Localhost-only binding, SSH tunnel access
 - 💰 **Use your AWS credits** - Works with $1,000 AWS Activate program
 - 🧠 **Any LLM backend** - Claude (Bedrock), Gemini, GPT, Anthropic API, and more
+- 🧠 **Enhanced memory** - Memory flush + session search (don't lose context!)
 - 💬 **Built-in web chat** - No external channels required
 - 📱 **Optional channels** - Email, X/Twitter, Telegram (Part 2)
 
@@ -188,6 +189,7 @@ Found an issue or have an improvement? PRs welcome!
 - [Clawdbot Documentation](https://docs.clawd.bot/)
 - [AWS Bedrock Docs](https://docs.aws.amazon.com/bedrock/)
 - [Crabwalk - Clawdbot Monitor](https://github.com/luccast/crabwalk)
+- [Memory Features Tip (X Post)](https://x.com/mayloidy/status/1884451877418135613) - Enable memory flush & session search
 - [Security Discussion (0xSammy)](https://x.com/0xSammy/status/2015562918151020593)
 - [Daniel Miessler's Security Checklist](https://x.com/DanielMiessler/status/2015865548714975475)
 

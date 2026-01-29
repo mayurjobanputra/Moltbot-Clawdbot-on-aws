@@ -834,6 +834,8 @@ Then from your **local machine** with the SSH tunnel:
 
 ### Step 1.12: Enable Advanced Memory Features (HIGHLY RECOMMENDED)
 
+> 💡 **Source:** [Memory Features Tip (X Post)](https://x.com/mayloidy/status/1884451877418135613) - Community discovery of these hidden defaults
+
 By default, ClawdBot's two best memory features are **turned OFF**. Enabling them dramatically improves context retention across sessions and compactions.
 
 #### What These Features Do
